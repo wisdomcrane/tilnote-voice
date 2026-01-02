@@ -106,6 +106,21 @@ pythonw voice_app.py
 | medium | 769M | ~1.5GB | ~5GB | 느림 | 매우 높음 |
 | large-v3 | 1550M | ~3GB | ~10GB | 매우 느림 | 최고 |
 
+## EXE 빌드 (선택)
+
+```bash
+# 가상환경 활성화 후
+.venv\Scripts\activate
+
+# PyInstaller 설치
+pip install pyinstaller
+
+# 빌드
+pyinstaller --onefile --noconsole --name TilnoteVoice voice_app.py
+```
+
+빌드된 파일: `dist/TilnoteVoice.exe`
+
 ## 라이선스
 
 MIT
