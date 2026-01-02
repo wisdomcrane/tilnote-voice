@@ -6,5 +6,10 @@ __pycache__/
 *.pyc
 .venv/
 
+# Build
+dist/
+build/
+*.spec
+
 # App config
 config.json

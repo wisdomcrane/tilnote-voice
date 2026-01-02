@@ -73,7 +73,6 @@ def signal_existing_instance():
 
 # 설정
 SAMPLE_RATE = 16000
-MODEL_SIZE = "medium" # 모델 크기 설정 (예: tiny, base, small, medium, large-v3)
 MAX_RECORD_SEC = 60  # 최대 녹음 시간 (초)
 
 # 플랫폼별 단축키 설정
@@ -81,6 +80,99 @@ if sys.platform == "darwin":  # Mac
     HOTKEY = "ctrl+cmd"
 else:  # Windows, Linux
     HOTKEY = "ctrl+win"
+
+# 자동 시작 관련 함수
+APP_NAME = "TilnoteVoice"
+
+def get_autostart_enabled():
+    """자동 시작 설정 여부 확인"""
+    if sys.platform == "win32":
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                                0, winreg.KEY_READ)
+            try:
+                winreg.QueryValueEx(key, APP_NAME)
+                return True
+            except WindowsError:
+                return False
+            finally:
+                winreg.CloseKey(key)
+        except:
+            return False
+    elif sys.platform == "darwin":  # Mac
+        plist_path = os.path.expanduser(f"~/Library/LaunchAgents/com.tilnote.voice.plist")
+        return os.path.exists(plist_path)
+    return False
+
+def set_autostart_enabled(enabled):
+    """자동 시작 설정/해제"""
+    if sys.platform == "win32":
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                                0, winreg.KEY_SET_VALUE)
+            if enabled:
+                # 현재 실행 파일 경로
+                if getattr(sys, 'frozen', False):
+                    # PyInstaller로 빌드된 exe
+                    exe_path = sys.executable
+                else:
+                    # Python 스크립트
+                    exe_path = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+                winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, exe_path)
+            else:
+                try:
+                    winreg.DeleteValue(key, APP_NAME)
+                except WindowsError:
+                    pass
+            winreg.CloseKey(key)
+            return True
+        except Exception as e:
+            print(f"[Voice App] 자동 시작 설정 오류: {e}")
+            return False
+    elif sys.platform == "darwin":  # Mac
+        plist_path = os.path.expanduser(f"~/Library/LaunchAgents/com.tilnote.voice.plist")
+        if enabled:
+            # LaunchAgent plist 생성
+            if getattr(sys, 'frozen', False):
+                program_path = sys.executable
+            else:
+                program_path = os.path.abspath(__file__)
+
+            plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tilnote.voice</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{sys.executable if not getattr(sys, 'frozen', False) else program_path}</string>
+        {f'<string>{program_path}</string>' if not getattr(sys, 'frozen', False) else ''}
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>"""
+            try:
+                os.makedirs(os.path.dirname(plist_path), exist_ok=True)
+                with open(plist_path, "w") as f:
+                    f.write(plist_content)
+                return True
+            except Exception as e:
+                print(f"[Voice App] 자동 시작 설정 오류: {e}")
+                return False
+        else:
+            try:
+                if os.path.exists(plist_path):
+                    os.remove(plist_path)
+                return True
+            except:
+                return False
+    return False
 
 def create_icon_image(color="gray"):
     """아이콘 이미지 생성 - 음파 모양"""
@@ -127,9 +219,9 @@ class VoiceApp:
         # UI 설정
         self.root = tk.Tk()
         self.root.title("Tilnote Voice")
-        self.root.geometry("400x200")
+        self.root.geometry("400x280")
         self.root.attributes("-topmost", True)
-        self.root.resizable(False, False)
+        self.root.resizable(False, True)  # 세로만 조절 가능
 
         # 창 아이콘 설정
         self.window_icon = ImageTk.PhotoImage(create_icon_image())
@@ -157,9 +249,17 @@ class VoiceApp:
         self.volume_canvas.pack(side="left", padx=10)
         self.volume_bar = self.volume_canvas.create_rectangle(0, 0, 0, 16, fill="#4CAF50", outline="")
 
-        # 결과 라벨
-        self.result_label = ttk.Label(frame, text="", font=("맑은 고딕", 10), wraplength=280)
-        self.result_label.pack(pady=4)
+        # 결과 텍스트 영역 (스크롤 가능, 선택/복사 가능)
+        result_frame = ttk.Frame(frame)
+        result_frame.pack(pady=4, fill="both", expand=True)
+
+        self.result_text = tk.Text(result_frame, font=("맑은 고딕", 10), wrap="word", height=4,
+                                   state="disabled", bg="#f8f8f8", relief="flat", padx=5, pady=5)
+        result_scrollbar = ttk.Scrollbar(result_frame, orient="vertical", command=self.result_text.yview)
+        self.result_text.configure(yscrollcommand=result_scrollbar.set)
+
+        self.result_text.pack(side="left", fill="both", expand=True)
+        result_scrollbar.pack(side="right", fill="y")
 
         # 일반 버튼 프레임
         self.normal_btn_frame = ttk.Frame(frame)
@@ -204,7 +304,7 @@ class VoiceApp:
         """설정 창 표시"""
         settings_win = tk.Toplevel(self.root)
         settings_win.title("설정")
-        settings_win.geometry("300x200")
+        settings_win.geometry("300x230")
         settings_win.attributes("-topmost", True)
         settings_win.resizable(False, False)
         settings_win.transient(self.root)
@@ -225,9 +325,15 @@ class VoiceApp:
         lang_combo = ttk.Combobox(frame, textvariable=lang_var, values=["ko", "en", "ja", "zh"], state="readonly", width=15)
         lang_combo.grid(row=1, column=1, pady=5, padx=10)
 
+        # 시작 시 자동 실행
+        autostart_var = tk.BooleanVar(value=get_autostart_enabled())
+        autostart_check = ttk.Checkbutton(frame, text="Windows 시작 시 자동 실행" if sys.platform == "win32" else "로그인 시 자동 실행",
+                                          variable=autostart_var)
+        autostart_check.grid(row=2, column=0, columnspan=2, sticky="w", pady=8)
+
         # 현재 모델 표시
         current_label = ttk.Label(frame, text=f"현재 로드됨: {self.config.get('model_size', 'small')}", font=("맑은 고딕", 9), foreground="gray")
-        current_label.grid(row=2, column=0, columnspan=2, pady=10)
+        current_label.grid(row=3, column=0, columnspan=2, pady=5)
 
         def save_and_close():
             new_model = model_var.get()
@@ -238,12 +344,15 @@ class VoiceApp:
             self.config["language"] = new_lang
             save_config(self.config)
 
+            # 자동 시작 설정
+            set_autostart_enabled(autostart_var.get())
+
             if model_changed:
                 messagebox.showinfo("설정", f"모델이 '{new_model}'로 변경됩니다.\n앱을 재시작해주세요.", parent=settings_win)
             settings_win.destroy()
 
         # 저장 버튼
-        ttk.Button(frame, text="저장", width=10, command=save_and_close).grid(row=3, column=0, columnspan=2, pady=15)
+        ttk.Button(frame, text="저장", width=10, command=save_and_close).grid(row=4, column=0, columnspan=2, pady=15)
 
     def show_history(self):
         """히스토리 창 표시"""
@@ -303,10 +412,40 @@ class VoiceApp:
             self.config["history"] = history
             save_config(self.config)
 
+    def set_result_text(self, text):
+        """결과 텍스트 설정 (선택/복사 가능)"""
+        self.result_text.config(state="normal")
+        self.result_text.delete("1.0", "end")
+        if text:
+            self.result_text.insert("1.0", text)
+        self.result_text.config(state="disabled")
+
+    def is_model_downloaded(self, model_size):
+        """모델이 이미 다운로드되어 있는지 확인"""
+        cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
+        if not os.path.exists(cache_dir):
+            return False
+        # faster-whisper 모델 캐시 확인
+        for item in os.listdir(cache_dir):
+            if f"whisper-{model_size}" in item.lower():
+                return True
+        return False
+
     def load_model(self):
         """모델 로드"""
         model_size = self.config.get("model_size", "small")
-        self.status_label.config(text=f"모델 로딩 중... ({model_size})")
+
+        # 첫 다운로드 여부 확인
+        is_first_download = not self.is_model_downloaded(model_size)
+
+        if is_first_download:
+            self.status_label.config(text=f"모델 다운로드 중... ({model_size})")
+            self.result_text.config(state="normal")
+            self.result_text.delete("1.0", "end")
+            self.result_text.insert("1.0", "처음 실행 시 모델을 다운로드합니다.\n인터넷 연결이 필요하며, 약 1~2분 소요됩니다.")
+            self.result_text.config(state="disabled")
+        else:
+            self.status_label.config(text=f"모델 로딩 중... ({model_size})")
         self.root.update()
 
         # GPU 자동 감지
@@ -326,6 +465,12 @@ class VoiceApp:
             print("[Voice App] CPU 사용 (torch 없음)")
 
         self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
+
+        # 다운로드 완료 메시지 초기화
+        if is_first_download:
+            self.result_text.config(state="normal")
+            self.result_text.delete("1.0", "end")
+            self.result_text.config(state="disabled")
         self.model_loaded = True
         self.status_label.config(text=f"[{HOTKEY}] 녹음 시작")
         self.update_tray_icon("gray")
@@ -335,16 +480,14 @@ class VoiceApp:
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
-        # 화면 우측 하단에 배치 (작업표시줄 위)
+        # 화면 중앙에 배치
         self.root.update_idletasks()
         w = self.root.winfo_width()
         h = self.root.winfo_height()
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
-        margin = 20  # 화면 가장자리 여백
-        taskbar_height = 80  # 작업표시줄 높이 + 시스템 알림 영역
-        x = screen_w - w - margin
-        y = screen_h - h - taskbar_height - margin
+        x = (screen_w - w) // 2
+        y = (screen_h - h) // 2
         self.root.geometry(f"+{x}+{y}")
 
     def hide_window(self):
@@ -383,7 +526,7 @@ class VoiceApp:
         )
         self.stream.start()
         self.status_label.config(text="● 녹음 중...", foreground="red")
-        self.result_label.config(text=f"[{HOTKEY}] 다시 누르면 완료")
+        self.set_result_text(f"[{HOTKEY}] 다시 누르면 완료")
         self.update_tray_icon("red")
 
         # 타이머 & 볼륨 표시
@@ -438,7 +581,7 @@ class VoiceApp:
             self.stream.close()
         self.audio_data = []
         self.status_label.config(text="녹음 취소됨", foreground="gray")
-        self.result_label.config(text="")
+        self.set_result_text("")
         self.update_tray_icon("gray")
 
         # 타이머 숨기기
@@ -484,8 +627,7 @@ class VoiceApp:
             if text:
                 pyperclip.copy(text)
                 self.add_to_history(text)  # 히스토리 저장
-                display_text = text[:50] + "..." if len(text) > 50 else text
-                self.result_label.config(text=f"복사됨: {display_text}")
+                self.set_result_text(text)  # 전체 텍스트 표시 (선택/복사 가능)
                 self.status_label.config(text="클립보드에 복사됨!", foreground="green")
                 self.update_tray_icon("green")
             else:
