@@ -27,6 +27,9 @@ CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.j
 DEFAULT_CONFIG = {
     "model_size": "small",
     "language": "ko",
+    "max_record_sec": 60,
+    "vad_enabled": True,
+    "vad_silence_sec": 15,  # 침묵 후 자동 종료 (초)
     "history": []
 }
 
@@ -115,13 +118,13 @@ def set_autostart_enabled(enabled):
                                 r"Software\Microsoft\Windows\CurrentVersion\Run",
                                 0, winreg.KEY_SET_VALUE)
             if enabled:
-                # 현재 실행 파일 경로
+                # 현재 실행 파일 경로 + --silent 인자 (시작 시 창 안 띄움)
                 if getattr(sys, 'frozen', False):
                     # PyInstaller로 빌드된 exe
-                    exe_path = sys.executable
+                    exe_path = f'"{sys.executable}" --silent'
                 else:
                     # Python 스크립트
-                    exe_path = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+                    exe_path = f'"{sys.executable}" "{os.path.abspath(__file__)}" --silent'
                 winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, exe_path)
             else:
                 try:
@@ -152,6 +155,7 @@ def set_autostart_enabled(enabled):
     <array>
         <string>{sys.executable if not getattr(sys, 'frozen', False) else program_path}</string>
         {f'<string>{program_path}</string>' if not getattr(sys, 'frozen', False) else ''}
+        <string>--silent</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -215,6 +219,9 @@ class VoiceApp:
         self.timer_id = None
         self.record_seconds = 0
         self.current_volume = 0  # 음성 레벨
+        self.vad_model = None
+        self.silence_start = None  # 침묵 시작 시간
+        self.speech_detected = False  # 음성 감지 여부
 
         # UI 설정
         self.root = tk.Tk()
@@ -275,6 +282,9 @@ class VoiceApp:
         # 설정 버튼
         ttk.Button(self.normal_btn_frame, text="설정", width=6, command=self.show_settings).pack(side="left", padx=3)
 
+        # 종료 버튼
+        ttk.Button(self.normal_btn_frame, text="종료", width=6, command=self.quit_app).pack(side="left", padx=3)
+
         # 최소화 버튼
         ttk.Button(self.normal_btn_frame, text="최소화", width=6, command=self.hide_window).pack(side="left", padx=3)
 
@@ -304,7 +314,7 @@ class VoiceApp:
         """설정 창 표시"""
         settings_win = tk.Toplevel(self.root)
         settings_win.title("설정")
-        settings_win.geometry("300x230")
+        settings_win.geometry("300x350")
         settings_win.attributes("-topmost", True)
         settings_win.resizable(False, False)
         settings_win.transient(self.root)
@@ -325,23 +335,62 @@ class VoiceApp:
         lang_combo = ttk.Combobox(frame, textvariable=lang_var, values=["ko", "en", "ja", "zh"], state="readonly", width=15)
         lang_combo.grid(row=1, column=1, pady=5, padx=10)
 
+        # 최대 녹음 시간 선택
+        ttk.Label(frame, text="최대 녹음:", font=("맑은 고딕", 10)).grid(row=2, column=0, sticky="w", pady=5)
+        max_sec_options = {"30초": 30, "1분": 60, "2분": 120, "3분": 180, "5분": 300}
+        current_max_sec = self.config.get("max_record_sec", 60)
+        # 현재 값에 해당하는 라벨 찾기
+        current_label_text = "1분"
+        for label, val in max_sec_options.items():
+            if val == current_max_sec:
+                current_label_text = label
+                break
+        max_sec_var = tk.StringVar(value=current_label_text)
+        max_sec_combo = ttk.Combobox(frame, textvariable=max_sec_var, values=list(max_sec_options.keys()), state="readonly", width=15)
+        max_sec_combo.grid(row=2, column=1, pady=5, padx=10)
+
+        # VAD 활성화
+        vad_var = tk.BooleanVar(value=self.config.get("vad_enabled", True))
+        vad_check = ttk.Checkbutton(frame, text="음성 감지 (VAD) - 침묵 시 자동 종료",
+                                    variable=vad_var)
+        vad_check.grid(row=3, column=0, columnspan=2, sticky="w", pady=5)
+
+        # 침묵 후 자동 종료 시간
+        ttk.Label(frame, text="침묵 대기:", font=("맑은 고딕", 10)).grid(row=4, column=0, sticky="w", pady=5)
+        silence_options = {"3초": 3, "5초": 5, "10초": 10, "15초": 15, "20초": 20, "30초": 30}
+        current_silence = self.config.get("vad_silence_sec", 15)
+        current_silence_text = "15초"
+        for label, val in silence_options.items():
+            if val == current_silence:
+                current_silence_text = label
+                break
+        silence_var = tk.StringVar(value=current_silence_text)
+        silence_combo = ttk.Combobox(frame, textvariable=silence_var, values=list(silence_options.keys()), state="readonly", width=15)
+        silence_combo.grid(row=4, column=1, pady=5, padx=10)
+
         # 시작 시 자동 실행
         autostart_var = tk.BooleanVar(value=get_autostart_enabled())
         autostart_check = ttk.Checkbutton(frame, text="Windows 시작 시 자동 실행" if sys.platform == "win32" else "로그인 시 자동 실행",
                                           variable=autostart_var)
-        autostart_check.grid(row=2, column=0, columnspan=2, sticky="w", pady=8)
+        autostart_check.grid(row=5, column=0, columnspan=2, sticky="w", pady=8)
 
         # 현재 모델 표시
         current_label = ttk.Label(frame, text=f"현재 로드됨: {self.config.get('model_size', 'small')}", font=("맑은 고딕", 9), foreground="gray")
-        current_label.grid(row=3, column=0, columnspan=2, pady=5)
+        current_label.grid(row=6, column=0, columnspan=2, pady=5)
 
         def save_and_close():
             new_model = model_var.get()
             new_lang = lang_var.get()
+            new_max_sec = max_sec_options.get(max_sec_var.get(), 60)
+            new_vad = vad_var.get()
+            new_silence = silence_options.get(silence_var.get(), 5)
             model_changed = new_model != self.config.get("model_size")
 
             self.config["model_size"] = new_model
             self.config["language"] = new_lang
+            self.config["max_record_sec"] = new_max_sec
+            self.config["vad_enabled"] = new_vad
+            self.config["vad_silence_sec"] = new_silence
             save_config(self.config)
 
             # 자동 시작 설정
@@ -352,7 +401,7 @@ class VoiceApp:
             settings_win.destroy()
 
         # 저장 버튼
-        ttk.Button(frame, text="저장", width=10, command=save_and_close).grid(row=4, column=0, columnspan=2, pady=15)
+        ttk.Button(frame, text="저장", width=10, command=save_and_close).grid(row=7, column=0, columnspan=2, pady=15)
 
     def show_history(self):
         """히스토리 창 표시"""
@@ -466,6 +515,20 @@ class VoiceApp:
 
         self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
 
+        # VAD 모델 로드 (silero-vad)
+        if self.config.get("vad_enabled", True):
+            try:
+                import torch
+                self.vad_model, _ = torch.hub.load(
+                    repo_or_dir='snakers4/silero-vad',
+                    model='silero_vad',
+                    trust_repo=True
+                )
+                print("[Voice App] VAD 모델 로드됨")
+            except Exception as e:
+                print(f"[Voice App] VAD 로드 실패: {e}")
+                self.vad_model = None
+
         # 다운로드 완료 메시지 초기화
         if is_first_download:
             self.result_text.config(state="normal")
@@ -505,12 +568,37 @@ class VoiceApp:
             self.tray_icon.stop()
         self.root.quit()
 
-    def audio_callback(self, indata, frames, time, status):
+    def audio_callback(self, indata, frames, time_info, status):
         """오디오 스트림 콜백"""
         if self.recording:
             self.audio_data.append(indata.copy())
             # 볼륨 레벨 계산 (RMS)
             self.current_volume = np.sqrt(np.mean(indata**2)) * 5  # 0~1 범위로 스케일링
+
+            # VAD 체크
+            if self.vad_model is not None and self.config.get("vad_enabled", True):
+                try:
+                    import torch
+                    import time as time_module
+                    audio_tensor = torch.from_numpy(indata.flatten()).float()
+                    speech_prob = self.vad_model(audio_tensor, SAMPLE_RATE).item()
+
+                    if speech_prob > 0.5:
+                        # 음성 감지됨
+                        self.speech_detected = True
+                        self.silence_start = None
+                    else:
+                        # 침묵
+                        if self.speech_detected and self.silence_start is None:
+                            self.silence_start = time_module.time()
+                        elif self.silence_start is not None:
+                            silence_duration = time_module.time() - self.silence_start
+                            silence_threshold = self.config.get("vad_silence_sec", 5)
+                            if silence_duration >= silence_threshold:
+                                # 자동 종료 예약
+                                self.root.after(0, self.stop_recording)
+                except Exception as e:
+                    pass  # VAD 오류 무시
 
     def start_recording(self):
         """녹음 시작"""
@@ -518,6 +606,8 @@ class VoiceApp:
         self.recording = True
         self.record_seconds = 0
         self.current_volume = 0
+        self.silence_start = None
+        self.speech_detected = False
         self.stream = sd.InputStream(
             samplerate=SAMPLE_RATE,
             channels=1,
@@ -538,7 +628,8 @@ class VoiceApp:
         self.recording_btn_frame.pack(pady=10)
 
         # 자동 타임아웃 설정
-        self.timeout_id = self.root.after(MAX_RECORD_SEC * 1000, self.auto_stop)
+        max_sec = self.config.get("max_record_sec", 60)
+        self.timeout_id = self.root.after(max_sec * 1000, self.auto_stop)
 
     def update_timer(self):
         """타이머 및 볼륨 업데이트"""
@@ -641,10 +732,10 @@ class VoiceApp:
         self.root.after(3000, self.reset_status)
 
     def reset_status(self):
-        """상태 초기화 및 창 숨기기"""
+        """상태 초기화 및 창 자동 최소화"""
         self.status_label.config(text=f"[{HOTKEY}] 녹음 시작", foreground="black")
         self.update_tray_icon("gray")
-        self.hide_window()
+        self.hide_window()  # 트레이로 자동 최소화
 
     def transcribe(self, audio: np.ndarray) -> str:
         """음성을 텍스트로 변환"""
@@ -732,7 +823,7 @@ class VoiceApp:
             listener_thread = threading.Thread(target=listen, daemon=True)
             listener_thread.start()
 
-    def run(self):
+    def run(self, start_silent=False):
         """앱 실행"""
         print(f"[Voice App] 시작됨 - 시스템 트레이에서 실행 중")
         print(f"[Voice App] {HOTKEY} 키로 녹음 시작/중지")
@@ -745,7 +836,8 @@ class VoiceApp:
         self.setup_tray()
 
         # 모델 로드 (백그라운드)
-        self.show_window()
+        if not start_silent:
+            self.show_window()  # 일반 시작: 창 표시
         self.root.after(100, self.load_model)
 
         # 글로벌 핫키 등록
@@ -767,6 +859,9 @@ if __name__ == "__main__":
         signal_existing_instance()
         sys.exit(0)
 
+    # --silent 인자로 시작하면 창 안 띄움 (자동 시작용)
+    start_silent = "--silent" in sys.argv
+
     app = VoiceApp()
     app.lock_socket = lock
-    app.run()
+    app.run(start_silent=start_silent)
